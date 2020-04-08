@@ -5,6 +5,7 @@ Parameters:
   Environment:
     Type: String
     Description: The environment where the resources are deployed.
+    Default: staging
     AllowedValues:
       - staging
       - production
@@ -178,6 +179,8 @@ Outputs:
   NewUserAddedTopicArn:
     Description: SNS Topic arn for subscriptions from other services
     Value: !Ref NewUserAddedTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-NewUserAdded"
   LogNewUserToS3Arn:
     Description: arn from log-new-user-to-s3 function
     Value: !GetAtt LogNewUserToS3.Arn

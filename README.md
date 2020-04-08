@@ -1,6 +1,6 @@
 # New User Service
 
-This repository contains a microservice that uses Amazon Cognito to manage the registration process, then stores the user information in S3. An event is created using a confirmation trigger and sent to SNS with the user information payload. This topic can be subscribed to by other services.
+This repository contains a microservice that uses Amazon Cognito to manage the registration process, then stores the user information in S3. An event is created using a confirmation trigger and sent to an SNS topic with the user information payload. This topic can be subscribed to by other services by using the topic ARN from the stack output.
 
 It also provides a pipeline for staging and prodution environments using the AWS CDK.
 
@@ -58,12 +58,15 @@ cdk deploy --require-approval never --profile your-aws-profile
 ```sh
 git remote add origin
 ```
-2. Push the local repo to CodeCommit. The new code will trigger the pipeline and it will create all the resources defined in template.yaml
+2. Push the local repo to CodeCommit. The new code will trigger the pipeline and it will package and create all the resources defined in template.yaml
 
 ```sh
 git push origin master
 ```
-After the pipeline has run there will be a new Cognito user pool created. There is no front-end included in this service so testing has to be done with scripts or a proprietary front-end.
+
+The pipeline will run through build, test and deploy to staging stages. After the pipeline has run there will be a new Cognito user pool created. There is no front-end included in this service so testing has to be done with scripts or a proprietary front-end.
+
+There is a manual approval stage before changes are deployed to production. This can be accessed in the CodePipeline console.
 
 ## Notes
 * This project has borrowed heavily from https://github.com/aws-samples/aws-serverless-app-sam-cdk/ . Take a look at that repository for more information.
