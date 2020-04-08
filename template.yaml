@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+
+Parameters:
+  Environment:
+    Type: String
+    Description: The environment where the resources are deployed.
+    AllowedValues:
+      - staging
+      - production
+  Version:
+    Type: String
+    Description: Version number we wish to pass on to tags, etc.
+    Default: 0.0.1  
+
+Conditions:
+  IsProduction: !Equals [ !Ref Environment, production ]
+
+Globals:
+  Function:
+    Runtime: nodejs12.x
+    MemorySize: 128
+    Timeout: 5
+
+Resources: 
+  # Cognito User Pool   
+  NewUsersPool:
+    Type: 'AWS::Cognito::UserPool'
+    Properties:
+      UserPoolName: !Sub '${AWS::StackName}'
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+      AutoVerifiedAttributes:
+        - email
+      AliasAttributes:
+        - email
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: false
+          Required: true
+        - Name: organization
+          AttributeDataType: String
+          Mutable: true
+      UserPoolTags:
+        version: !Ref Version
+  UserPoolClient:
+    Type: 'AWS::Cognito::UserPoolClient'
+    Properties:
+      ClientName: !Sub '${AWS::StackName}-client'
+      ExplicitAuthFlows:
+        - 'ALLOW_ADMIN_USER_PASSWORD_AUTH'
+        - 'ALLOW_REFRESH_TOKEN_AUTH'
+      UserPoolId: !Ref NewUsersPool
+      WriteAttributes:
+        - 'email'
+        - 'custom:organization'
+  UserPoolGroup:
+    Type: 'AWS::Cognito::UserPoolGroup'
+    Properties:
+      GroupName: 'SuperAdmin'
+      Precedence: 0
+      UserPoolId: !Ref NewUsersPool
+
+  # S3 Bucket
+  NewUserLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'new-user-service-user-logs-${Environment}'
+      AccessControl: Private
+      NotificationConfiguration:
+        TopicConfigurations:
+        - Topic: !Ref NewUserAddedTopic
+          Event: s3:ObjectCreated:Put
+
+  # SNS Topic
+  NewUserAddedTopic:
+    Type: AWS::SNS::Topic
+  
+  NewUserAddedTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+        - Sid: NewUserAddedTopicPolicyStatement
+          Effect: Allow
+          Action: sns:Publish
+          Principal: "*"
+          Resource: !Ref NewUserAddedTopic
+      Topics:
+        - !Ref NewUserAddedTopic    
+
+  # Lambdas
+  LogNewUserToS3:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'log-new-user-to-s3-${Environment}'
+      CodeUri: ./src/log-new-user-to-s3/
+      Handler: index.handler
+      AutoPublishAlias: !Ref Environment
+      DeploymentPreference:
+        Type: !If [IsProduction, Canary10Percent5Minutes, AllAtOnce]
+        Alarms:
+          - !Ref AliasErrorMetricGreaterThanZeroAlarm
+        Hooks:
+          PreTraffic: !Ref PreTrafficCheckFunction
+      Environment:
+        Variables:
+          BUCKET_NAME: !Sub 'new-user-service-user-logs-${Environment}'
+      Tags:
+        project: !Sub ${AWS::StackName}
+        environment: !Ref Environment         
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Sub 'new-user-service-user-logs-${Environment}'
+      Events:
+        ConfirmNewUserEvent:
+          Type: Cognito
+          Properties:
+            UserPool:
+              Ref: NewUsersPool
+            Trigger: PostConfirmation         
+
+  PreTrafficCheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'CodeDeployHook_log-new-user-to-s3-${Environment}-pre-traffic-check'           
+      CodeUri: ./src/log-new-user-to-s3/
+      Handler: pre-traffic-check.handler
+      Environment:
+        Variables:
+          BUCKET_NAME: !Sub 'new-user-service-user-logs-${Environment}'
+          FN_NEW_VERSION: !Ref LogNewUserToS3.Version
+      Tags:
+        project: !Sub ${AWS::StackName}    
+        environment: !Ref Environment
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Sub 'new-user-service-user-logs-${Environment}'  
+        - Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - codedeploy:PutLifecycleEventHookExecutionStatus
+            Resource:
+              !Sub 'arn:${AWS::Partition}:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentgroup:${ServerlessDeploymentApplication}/*'
+        - Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !Ref LogNewUserToS3.Version
+
+  # CloudWatch          
+  AliasErrorMetricGreaterThanZeroAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Lambda Function Error > 0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Resource
+          Value: !Sub '${LogNewUserToS3}:${Environment}'
+        - Name: FunctionName
+          Value: !Ref LogNewUserToS3
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0       
+      
+Outputs:   
+  NewUserAddedTopicArn:
+    Description: SNS Topic arn for subscriptions from other services
+    Value: !Ref NewUserAddedTopic
+  LogNewUserToS3Arn:
+    Description: arn from log-new-user-to-s3 function
+    Value: !GetAtt LogNewUserToS3.Arn
+  LogNewUserToS3IamRole:
+    Description: IAM role arn for log-new-user-to-s3 function
+    Value: !GetAtt LogNewUserToS3Role.Arn
+  NewUserLogs:
+    Description: New user logs S3 url
+    Value: !GetAtt NewUserLogsBucket.WebsiteURL
+  PreTrafficCheckFunctionArn:
+    Description: Pre Traffic check function arn
+    Value: !GetAtt PreTrafficCheckFunction.Arn
+  PreTrafficCheckFunctionIamRole:
+    Description: IAM role arn for PreTrafficCheckFunctionRole
+    Value: !GetAtt PreTrafficCheckFunctionRole.Arn    
